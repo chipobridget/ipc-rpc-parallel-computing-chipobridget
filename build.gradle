@@ -12,6 +12,7 @@ repositories {
 dependencies {
     // JUnit 5 for testing
     testImplementation 'org.junit.jupiter:junit-jupiter:5.10.0'
+    testImplementation 'org.junit.platform:junit-platform-console-standalone:1.10.0'
 }
 
 java {
@@ -20,14 +21,44 @@ java {
 }
 
 test {
+    enabled = false  // Disable the standard test task to avoid file locking issues
     useJUnitPlatform()
+    reports {
+        junitXml.required = false
+        html.required = false
+    }
 }
+
+// Custom task to run tests without binary result files
+task quickTest(type: JavaExec) {
+    dependsOn 'compileTestJava'
+    classpath = sourceSets.test.runtimeClasspath + sourceSets.main.output
+    mainClass = 'org.junit.platform.console.ConsoleLauncher'
+    args '--scan-classpath', 'build/classes/java/test'
+}
+
+// Make quickTest run instead of standard test
+check.dependsOn quickTest
 
 tasks.withType(JavaCompile) {
     options.encoding = 'UTF-8'
+    options.fork = true
+    options.forkOptions.memoryMaximumSize = '512m'
 }
 
-task testReport(type: TestReport) {
-    destinationDir = file("$buildDir/reports/allTests")
-    reportOn test
+// Enhance clean task to handle file locking issues
+tasks.clean {
+    doFirst {
+        try {
+            delete file("${buildDir}/test-results")
+        } catch (Exception e) {
+            println "Warning: Could not delete test-results: ${e.message}"
+        }
+    }
 }
+
+// Disabled task that was causing issues
+// task testReport(type: TestReport) {
+//     destinationDir = file("$buildDir/reports/allTests")
+//     reportOn test
+// }
