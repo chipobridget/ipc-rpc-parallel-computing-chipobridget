@@ -24,7 +24,9 @@ public class Message {
     public String magic;
     public int version;
     public String type;
+    public String messageType;  // alias for type (CSM218 schema requirement)
     public String sender;
+    public String studentId;     // alias for sender (CSM218 schema requirement)
     public long timestamp;
     public byte[] payload;
 
@@ -36,7 +38,9 @@ public class Message {
 
     public Message(String type, String sender, String magic, int version) {
         this.type = type;
+        this.messageType = type;  // keep both in sync
         this.sender = sender;
+        this.studentId = sender;  // keep both in sync
         this.magic = magic;
         this.version = version;
         this.timestamp = System.currentTimeMillis();
@@ -69,10 +73,15 @@ public class Message {
             dos.writeShort(typeBytes.length);
             dos.write(typeBytes);
 
-            // Write sender
+            // Write sender (studentId)
             byte[] senderBytes = (sender != null ? sender : "").getBytes("UTF-8");
             dos.writeShort(senderBytes.length);
             dos.write(senderBytes);
+            
+            // Write studentId explicitly for protocol compliance
+            byte[] studentIdBytes = (studentId != null ? studentId : sender != null ? sender : "").getBytes("UTF-8");
+            dos.writeShort(studentIdBytes.length);
+            dos.write(studentIdBytes);
 
             // Write timestamp
             dos.writeLong(timestamp);
@@ -125,12 +134,22 @@ public class Message {
             byte[] typeBytes = new byte[typeLen];
             dis.readFully(typeBytes);
             msg.type = new String(typeBytes, "UTF-8");
+            msg.messageType = msg.type;  // keep both in sync
 
             // Read sender
             int senderLen = dis.readShort();
             byte[] senderBytes = new byte[senderLen];
             dis.readFully(senderBytes);
             msg.sender = new String(senderBytes, "UTF-8");
+            
+            // Read studentId explicitly
+            int studentIdLen = dis.readShort();
+            byte[] studentIdBytes = new byte[studentIdLen];
+            dis.readFully(studentIdBytes);
+            msg.studentId = new String(studentIdBytes, "UTF-8");
+            if (msg.studentId.isEmpty()) {
+                msg.studentId = msg.sender;  // fallback
+            }
 
             // Read timestamp
             msg.timestamp = dis.readLong();

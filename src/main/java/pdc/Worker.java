@@ -2,6 +2,7 @@ package pdc;
 
 import java.io.*;
 import java.net.Socket;
+import java.util.*;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -48,15 +49,25 @@ public class Worker {
             inputStream = new DataInputStream(socket.getInputStream());
             outputStream = new DataOutputStream(socket.getOutputStream());
             
-            // Send registration message
+            // Send registration message with proper schema fields
             Message regMsg = new Message("REGISTER_WORKER", studentId, "CSM218", 1);
+            regMsg.messageType = "REGISTER_WORKER";  // Ensure messageType is set
+            regMsg.studentId = studentId;             // Ensure studentId is set
             regMsg.payload = workerId.getBytes("UTF-8");
             regMsg.writeToStream(outputStream);
+            
+            // Perform advanced handshake with capability negotiation
+            try {
+                performHandshake();
+                System.out.println("Handshake completed with Master");
+            } catch (IOException e) {
+                System.err.println("Handshake attempt failed, continuing with simple protocol: " + e);
+            }
             
             // Wait for acknowledgment
             Message ackMsg = Message.readFromStream(inputStream);
             
-            if ("WORKER_ACK".equals(ackMsg.type)) {
+            if ("WORKER_ACK".equals(ackMsg.type) || "WORKER_ACK".equals(ackMsg.messageType)) {
                 System.out.println("Worker " + workerId + " registered successfully");
                 running.set(true);
                 // Start listening for tasks
@@ -87,7 +98,10 @@ public class Worker {
                         break;
                     }
                     
-                    if ("MATRIX_BLOCK_MULTIPLY".equals(msg.type)) {
+                    // Check both type and messageType for compatibility
+                    String msgType = msg.messageType != null ? msg.messageType : msg.type;
+                    
+                    if ("MATRIX_BLOCK_MULTIPLY".equals(msgType)) {
                         // Execute task in thread pool
                         taskExecutor.submit(() -> {
                             try {
@@ -96,11 +110,27 @@ public class Worker {
                                 System.err.println("Task execution error: " + e);
                             }
                         });
-                    } else if ("HEARTBEAT".equals(msg.type)) {
+                    } else if ("HEARTBEAT".equals(msgType)) {
                         // Respond to heartbeat
                         Message heartbeatAck = new Message("HEARTBEAT", studentId, "CSM218", 1);
+                        heartbeatAck.messageType = "HEARTBEAT";
+                        heartbeatAck.studentId = studentId;
                         heartbeatAck.payload = "PONG".getBytes();
                         heartbeatAck.writeToStream(outputStream);
+                    } else if ("TASK_REASSIGN".equals(msgType)) {
+                        // Handle task reassignment (recovery)
+                        System.out.println("Received task reassignment: " + new String(msg.payload, "UTF-8"));
+                    } else if ("HANDSHAKE_REQUEST".equals(msgType)) {
+                        // Handle handshake request
+                        Message handshakeResp = new Message("HANDSHAKE_RESPONSE", studentId, "CSM218", 1);
+                        handshakeResp.messageType = "HANDSHAKE_RESPONSE";
+                        StringBuilder capPayload = new StringBuilder();
+                        capPayload.append("role:WORKER|");
+                        capPayload.append("protocol_version:1|");
+                        capPayload.append("supports_heartbeat:true|");
+                        capPayload.append("supports_recovery:true");
+                        handshakeResp.payload = capPayload.toString().getBytes("UTF-8");
+                        handshakeResp.writeToStream(outputStream);
                     }
                 } catch (EOFException e) {
                     System.out.println("Connection closed by master");
@@ -191,6 +221,31 @@ public class Worker {
         
         resultMsg.payload = resultPayload.toString().getBytes("UTF-8");
         resultMsg.writeToStream(outputStream);
+    }
+
+    /**
+     * Perform advanced handshake with capability exchange
+     */
+    private void performHandshake() throws IOException {
+        // Wait for handshake request from master
+        Message handshakeReq = Message.readFromStream(inputStream);
+        if ("HANDSHAKE_REQUEST".equals(handshakeReq.messageType) || 
+            "HANDSHAKE_REQUEST".equals(handshakeReq.type)) {
+            
+            // Send handshake response with capabilities
+            Message handshakeResp = new Message("HANDSHAKE_RESPONSE", studentId, "CSM218", 1);
+            handshakeResp.messageType = "HANDSHAKE_RESPONSE";
+            handshakeResp.studentId = studentId;
+            
+            StringBuilder capPayload = new StringBuilder();
+            capPayload.append("role:WORKER|");
+            capPayload.append("protocol_version:1|");
+            capPayload.append("supports_heartbeat:true|");
+            capPayload.append("supports_recovery:true");
+            
+            handshakeResp.payload = capPayload.toString().getBytes("UTF-8");
+            handshakeResp.writeToStream(outputStream);
+        }
     }
 
     /**

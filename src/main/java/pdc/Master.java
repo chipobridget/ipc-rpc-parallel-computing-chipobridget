@@ -21,6 +21,8 @@ public class Master {
     private final BlockingQueue<Task> taskQueue = new LinkedBlockingQueue<>();
     private final Map<String, TaskResult> results = new ConcurrentHashMap<>();
     private final Map<String, Long> workerHeartbeat = new ConcurrentHashMap<>();
+    private final Map<String, String> taskToWorker = new ConcurrentHashMap<>();  // Task ID -> Worker ID
+    private final Map<String, Task> activeTasks = new ConcurrentHashMap<>();     // Task ID -> Task
     private static final long HEARTBEAT_TIMEOUT_MS = 5000;
 
     public Master() {
@@ -90,25 +92,42 @@ public class Master {
     }
 
     private void handleWorkerConnection(Socket socket) {
+        String workerId = null;
         try {
             DataInputStream dis = new DataInputStream(socket.getInputStream());
             DataOutputStream dos = new DataOutputStream(socket.getOutputStream());
             Message msg = Message.readFromStream(dis);
             if ("REGISTER_WORKER".equals(msg.type)) {
-                String workerId = new String(msg.payload, "UTF-8");
+                workerId = new String(msg.payload, "UTF-8");
+                
+                // Perform advanced handshake with capability negotiation
+                try {
+                    performHandshake(dis, dos);
+                    System.out.println("Handshake completed with worker: " + workerId);
+                } catch (IOException e) {
+                    System.err.println("Handshake failed: " + e);
+                }
+                
                 WorkerConnection worker = new WorkerConnection(workerId, socket, dis, dos);
                 workers.put(workerId, worker);
                 workerHeartbeat.put(workerId, System.currentTimeMillis());
                 System.out.println("Worker registered: " + workerId);
+                
+                // Send ack
                 Message ack = new Message("WORKER_ACK", studentId, "CSM218", 1);
                 ack.payload = "OK".getBytes();
                 ack.writeToStream(dos);
+                
                 while (running.get()) {
                     try {
                         Message incomingMsg = Message.readFromStream(dis);
                         if (incomingMsg == null) break;
                         if ("TASK_COMPLETE".equals(incomingMsg.type)) {
+                            // Extract task ID from payload
+                            String taskId = extractTaskId(incomingMsg.payload);
                             results.put(workerId, new TaskResult(workerId, incomingMsg.payload));
+                            taskToWorker.remove(taskId);
+                            activeTasks.remove(taskId);
                         } else if ("HEARTBEAT".equals(incomingMsg.type)) {
                             workerHeartbeat.put(workerId, System.currentTimeMillis());
                         }
@@ -120,6 +139,9 @@ public class Master {
         } catch (IOException e) {
             System.err.println("Connection error: " + e);
         } finally {
+            if (workerId != null) {
+                removeWorker(workerId);
+            }
             try {
                 socket.close();
             } catch (IOException e) {
@@ -136,6 +158,77 @@ public class Master {
             } catch (IOException e) {
                 System.err.println("Error closing worker socket: " + e);
             }
+        }
+        
+        // RECOVERY MECHANISM: Reassign tasks from failed worker to available workers
+        List<String> tasksToReassign = new ArrayList<>();
+        for (Map.Entry<String, String> entry : taskToWorker.entrySet()) {
+            if (workerId.equals(entry.getValue())) {
+                tasksToReassign.add(entry.getKey());
+            }
+        }
+        
+        if (!tasksToReassign.isEmpty()) {
+            System.out.println("Recovering " + tasksToReassign.size() + " tasks from failed worker: " + workerId);
+            for (String taskId : tasksToReassign) {
+                Task task = activeTasks.get(taskId);
+                if (task != null) {
+                    // Find an available worker to reassign this task
+                    for (WorkerConnection availableWorker : workers.values()) {
+                        try {
+                            // Send task reassignment notification
+                            Message reassignMsg = new Message("TASK_REASSIGN", studentId, "CSM218", 1);
+                            reassignMsg.payload = (taskId + "|" + availableWorker.workerId).getBytes("UTF-8");
+                            reassignMsg.writeToStream(availableWorker.dos);
+                            taskToWorker.put(taskId, availableWorker.workerId);
+                            System.out.println("Reassigned task " + taskId + " to worker " + availableWorker.workerId);
+                            break;
+                        } catch (IOException e) {
+                            System.err.println("Failed to reassign task: " + e);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private void performHandshake(DataInputStream dis, DataOutputStream dos) throws IOException {
+        // Send handshake request with capabilities
+        Message handshakeMsg = new Message("HANDSHAKE_REQUEST", studentId, "CSM218", 1);
+        handshakeMsg.messageType = "HANDSHAKE_REQUEST";
+        
+        // Build capability payload
+        StringBuilder capabilityPayload = new StringBuilder();
+        capabilityPayload.append("role:MASTER|");
+        capabilityPayload.append("protocol_version:1|");
+        capabilityPayload.append("timestamp:").append(System.currentTimeMillis()).append("|");
+        capabilityPayload.append("supports_heartbeat:true|");
+        capabilityPayload.append("supports_recovery:true");
+        
+        handshakeMsg.payload = capabilityPayload.toString().getBytes("UTF-8");
+        handshakeMsg.writeToStream(dos);
+        
+        // Read handshake response with timeout
+        long startTime = System.currentTimeMillis();
+        long timeout = 5000;
+        Message responseMsg = null;
+        while (System.currentTimeMillis() - startTime < timeout) {
+            try {
+                responseMsg = Message.readFromStream(dis);
+                if ("HANDSHAKE_RESPONSE".equals(responseMsg.messageType) || 
+                    "HANDSHAKE_RESPONSE".equals(responseMsg.type)) {
+                    break;
+                }
+            } catch (IOException e) {
+                if (System.currentTimeMillis() - startTime >= timeout) {
+                    throw e;
+                }
+            }
+        }
+        
+        if (responseMsg == null || (!("HANDSHAKE_RESPONSE".equals(responseMsg.messageType)) && 
+            !("HANDSHAKE_RESPONSE".equals(responseMsg.type)))) {
+            throw new IOException("Handshake failed - no response received");
         }
     }
 
@@ -189,6 +282,21 @@ public class Master {
         
         void setCurrentTask(Task task) {
             this.currentTask = task;
+        }
+    }
+    
+    // Helper method to extract task ID from payload
+    private String extractTaskId(byte[] payload) {
+        if (payload == null || payload.length == 0) {
+            return null;
+        }
+        try {
+            String payloadStr = new String(payload, "UTF-8");
+            // Assume task ID is the first component separated by ':'
+            String[] parts = payloadStr.split(":", 2);
+            return parts.length > 0 ? parts[0] : null;
+        } catch (Exception e) {
+            return null;
         }
     }
 
